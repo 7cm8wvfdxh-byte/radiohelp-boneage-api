@@ -1,6 +1,6 @@
 """
-RadioHelp — Kemik Yaşı API (Render Deploy)
-FastAPI backend — CBAM model ile inference
+RadioHelp — Kemik Yaşı API v2.3 (Render Deploy)
+FastAPI backend — CBAM model, HuggingFace'ten otomatik indirme
 """
 
 from fastapi import FastAPI, UploadFile, File, Form
@@ -13,8 +13,8 @@ from albumentations.pytorch import ToTensorV2
 from model import BoneAgeModelV2
 import io
 import os
-import base64
 from datetime import date, datetime
+from huggingface_hub import hf_hub_download
 
 app = FastAPI(title="RadioHelp Bone Age API", version="2.3")
 
@@ -26,14 +26,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ============================================================
-#  GLOBAL MODEL (bir kere yükle, bellekte tut)
-# ============================================================
-
-DEVICE = "cpu"  # Render free tier CPU only
+DEVICE = "cpu"
 AGE_MAX = 240.0
 MODEL = None
 IMG_SIZE = 512
+
+# HuggingFace repo bilgileri
+HF_REPO = "TugrulHanSahin/radiohelp-boneage"
+HF_FILENAME = "best_convnext_cbam.pth"
+MODEL_PATH = "models/best_convnext_cbam.pth"
 
 CALIBRATION_TABLE = {
     ('0-4', 'erkek'):   {'mae': 8.39, 'median': 6.81, 'bias': -5.84, 'n': 44},
@@ -89,23 +90,32 @@ GP_ATLAS = {
 }
 
 
+def download_model():
+    """HuggingFace'ten modeli indir."""
+    os.makedirs("models", exist_ok=True)
+    if not os.path.exists(MODEL_PATH):
+        print(f"📥 Model HuggingFace'ten indiriliyor: {HF_REPO}/{HF_FILENAME}")
+        downloaded_path = hf_hub_download(
+            repo_id=HF_REPO,
+            filename=HF_FILENAME,
+            local_dir="models",
+            token=os.environ.get("HF_TOKEN", None)
+        )
+        print(f"✅ Model indirildi: {downloaded_path}")
+    else:
+        print(f"✅ Model zaten mevcut: {MODEL_PATH}")
+
+
 def load_model():
     global MODEL
-    model_path = "models/best_convnext_cbam.pth"
-    
-    if not os.path.exists(model_path):
-        # HuggingFace'ten indir (ilk başlatmada)
-        print("📥 Model indiriliyor...")
-        os.makedirs("models", exist_ok=True)
-        # TODO: HuggingFace URL eklenecek
-        # urllib.request.urlretrieve(HF_URL, model_path)
-    
+    download_model()
     MODEL = BoneAgeModelV2().to(DEVICE)
-    checkpoint = torch.load(model_path, map_location=DEVICE, weights_only=False)
+    checkpoint = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False)
     state = checkpoint.get('model_state_dict', checkpoint)
     MODEL.load_state_dict(state, strict=False)
     MODEL.eval()
-    print(f"✅ CBAM model yüklendi (MAE: {checkpoint.get('best_mae', 'N/A')})")
+    mae = checkpoint.get('best_mae', 'N/A')
+    print(f"✅ CBAM model yüklendi (MAE: {mae})")
 
 
 def get_tta_transforms():
@@ -136,94 +146,40 @@ def get_gp_reference(months, gender):
     }
 
 
-# ============================================================
-#  STARTUP
-# ============================================================
-
-@app.on_event("startup")
-async def startup():
-    load_model()
-
-
-# ============================================================
-#  ENDPOINTS
-# ============================================================
-
-@app.get("/")
-async def root():
-    return {
-        "service": "RadioHelp Bone Age API",
-        "version": "2.3",
-        "model": "ConvNeXt-CBAM (V2)",
-        "mae": "7.33 ay",
-        "status": "ready" if MODEL is not None else "loading"
-    }
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "model_loaded": MODEL is not None}
-
-
-@app.post("/api/bone-age")
-async def predict_bone_age(
-    image: UploadFile = File(...),
-    gender: str = Form(...),
-    birth_date: str = Form(None)
-):
-    """
-    Kemik yaşı tahmini.
-    
-    - image: Sol el AP grafisi (JPEG/PNG)
-    - gender: 'erkek' veya 'kız'
-    - birth_date: Doğum tarihi YYYY-MM-DD (opsiyonel)
-    """
-    if MODEL is None:
-        return {"success": False, "error": "Model yüklenmedi"}
-    
-    # Görüntüyü oku
-    contents = await image.read()
-    img = Image.open(io.BytesIO(contents)).convert('RGB')
-    img_np = np.array(img)
-    
-    gender_val = 1.0 if gender.lower() in ['erkek', 'm', 'male', '1'] else 0.0
-    gender_key = 'erkek' if gender_val == 1.0 else 'kız'
+def predict_image(img_np, gender_val):
+    """Görüntüden TTA tahmin yap."""
     gender_tensor = torch.tensor([gender_val]).to(DEVICE)
-    
-    # TTA tahmin
     predictions = []
     with torch.no_grad():
         for tf in get_tta_transforms():
             img_tensor = tf(image=img_np)['image'].unsqueeze(0).to(DEVICE)
             pred = MODEL(img_tensor, gender_tensor).item() * AGE_MAX
             predictions.append(pred)
-    
+    return predictions
+
+
+def build_response(predictions, gender_key, birth_date=None):
+    """Tahminlerden response oluştur."""
     pred_mean = float(np.mean(predictions))
     pred_std = float(np.std(predictions))
     yil, ay = int(pred_mean // 12), int(pred_mean % 12)
-    
-    # Kalibre güven aralığı
+
     age_group = get_age_group(pred_mean)
     cal = CALIBRATION_TABLE.get((age_group, gender_key),
                                  {'mae': 7.33, 'median': 6.21, 'bias': -1.03, 'n': 0})
-    
+
     combined_error = (pred_std * 0.4) + (cal['mae'] * 0.6)
     confidence_95 = round(combined_error * 1.96, 1)
-    
+
     if combined_error < 5:
-        reliability = "high"
-        reliability_label = "Yüksek Güvenilirlik"
+        reliability, reliability_label = "high", "Yüksek Güvenilirlik"
     elif combined_error < 8:
-        reliability = "medium"
-        reliability_label = "Orta Güvenilirlik"
+        reliability, reliability_label = "medium", "Orta Güvenilirlik"
     else:
-        reliability = "low"
-        reliability_label = "Düşük Güvenilirlik"
-    
-    # GP Atlas
+        reliability, reliability_label = "low", "Düşük Güvenilirlik"
+
     gp = get_gp_reference(pred_mean, gender_key)
-    
-    # Response
+
     result = {
         "success": True,
         "prediction": {
@@ -251,22 +207,21 @@ async def predict_bone_age(
         },
         "disclaimer": "Bu sonuç yalnızca karar destek amaçlıdır. Kesin tanı için radyolog değerlendirmesi gereklidir."
     }
-    
-    # Kronolojik yaş (varsa)
+
     if birth_date:
         try:
             birth = datetime.strptime(birth_date, '%Y-%m-%d').date()
             today = date.today()
             krono_ay = (today.year - birth.year) * 12 + (today.month - birth.month)
             fark = pred_mean - krono_ay
-            
+
             if abs(fark) <= 12:
                 fark_yorum = "Normal sınırlar içinde (±1 yıl)"
             elif abs(fark) <= 24:
                 fark_yorum = "Sınırda — klinik değerlendirme önerilir"
             else:
                 fark_yorum = "Anormal — endokrinoloji konsültasyonu önerilir"
-            
+
             result["clinical_context"] = {
                 "chronological_age_months": krono_ay,
                 "chronological_age_display": f"{krono_ay // 12} yıl {krono_ay % 12} ay",
@@ -277,70 +232,64 @@ async def predict_bone_age(
             }
         except ValueError:
             pass
-    
+
     return result
+
+
+@app.on_event("startup")
+async def startup():
+    load_model()
+
+
+@app.get("/")
+async def root():
+    return {
+        "service": "RadioHelp Bone Age API",
+        "version": "2.3",
+        "model": "ConvNeXt-CBAM (V2)",
+        "mae": "7.33 ay",
+        "status": "ready" if MODEL is not None else "loading"
+    }
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "model_loaded": MODEL is not None}
+
+
+@app.post("/api/bone-age")
+async def predict_bone_age(
+    image: UploadFile = File(...),
+    gender: str = Form(...),
+    birth_date: str = Form(None)
+):
+    if MODEL is None:
+        return {"success": False, "error": "Model yüklenmedi"}
+
+    contents = await image.read()
+    img = Image.open(io.BytesIO(contents)).convert('RGB')
+    img_np = np.array(img)
+
+    gender_val = 1.0 if gender.lower() in ['erkek', 'm', 'male', '1'] else 0.0
+    gender_key = 'erkek' if gender_val == 1.0 else 'kız'
+
+    predictions = predict_image(img_np, gender_val)
+    return build_response(predictions, gender_key, birth_date)
 
 
 @app.post("/api/bone-age-base64")
 async def predict_bone_age_base64(data: dict):
-    """
-    Base64 encoded görüntü ile tahmin.
-    Body: {"image": "base64...", "gender": "erkek", "birth_date": "2015-10-15"}
-    """
     if MODEL is None:
         return {"success": False, "error": "Model yüklenmedi"}
-    
+
     import base64
     img_bytes = base64.b64decode(data['image'])
     img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
     img_np = np.array(img)
-    
+
     gender = data.get('gender', 'erkek')
     gender_val = 1.0 if gender.lower() in ['erkek', 'm', 'male', '1'] else 0.0
     gender_key = 'erkek' if gender_val == 1.0 else 'kız'
-    gender_tensor = torch.tensor([gender_val]).to(DEVICE)
-    
-    predictions = []
-    with torch.no_grad():
-        for tf in get_tta_transforms():
-            img_tensor = tf(image=img_np)['image'].unsqueeze(0).to(DEVICE)
-            pred = MODEL(img_tensor, gender_tensor).item() * AGE_MAX
-            predictions.append(pred)
-    
-    pred_mean = float(np.mean(predictions))
-    pred_std = float(np.std(predictions))
-    yil, ay = int(pred_mean // 12), int(pred_mean % 12)
-    
-    age_group = get_age_group(pred_mean)
-    cal = CALIBRATION_TABLE.get((age_group, gender_key),
-                                 {'mae': 7.33, 'median': 6.21, 'bias': -1.03, 'n': 0})
-    combined_error = (pred_std * 0.4) + (cal['mae'] * 0.6)
-    confidence_95 = round(combined_error * 1.96, 1)
-    
-    if combined_error < 5:
-        reliability, label = "high", "Yüksek Güvenilirlik"
-    elif combined_error < 8:
-        reliability, label = "medium", "Orta Güvenilirlik"
-    else:
-        reliability, label = "low", "Düşük Güvenilirlik"
-    
-    gp = get_gp_reference(pred_mean, gender_key)
-    
-    return {
-        "success": True,
-        "prediction": {
-            "bone_age_months": round(pred_mean, 1),
-            "bone_age_display": f"{yil} yıl {ay} ay",
-            "confidence_interval": f"±{confidence_95} ay",
-            "tta_std": round(pred_std, 2),
-            "reliability": reliability,
-            "reliability_label": label,
-        },
-        "calibration": {
-            "age_group": f"{age_group} Yaş",
-            "group_mae": cal['mae'],
-            "group_median": cal['median'],
-        },
-        "atlas_comparison": gp,
-        "disclaimer": "Bu sonuç yalnızca karar destek amaçlıdır."
-    }
+
+    predictions = predict_image(img_np, gender_val)
+    return build_response(predictions, gender_key, data.get('birth_date'))
