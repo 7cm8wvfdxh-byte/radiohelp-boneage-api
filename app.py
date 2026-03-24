@@ -1,6 +1,6 @@
 """
 RadioHelp — Kemik Yaşı API v2.3 (Render Deploy)
-FastAPI backend — CBAM model, HuggingFace'ten otomatik indirme
+ConvNeXt-Small V1, HuggingFace'ten otomatik indirme
 """
 
 from fastapi import FastAPI, UploadFile, File, Form
@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-from model import BoneAgeModelV2
+from model import BoneAgeModel
 import io
 import os
 from datetime import date, datetime
@@ -31,20 +31,19 @@ AGE_MAX = 240.0
 MODEL = None
 IMG_SIZE = 512
 
-# HuggingFace repo bilgileri
 HF_REPO = "TugrulHanSahin/radiohelp-boneage"
-HF_FILENAME = "best_convnext_cbam.pth"
-MODEL_PATH = "models/best_convnext_cbam.pth"
+HF_FILENAME = "best_convnext_small.pth"
+MODEL_PATH = "models/best_convnext_small.pth"
 
 CALIBRATION_TABLE = {
-    ('0-4', 'erkek'):   {'mae': 8.39, 'median': 6.81, 'bias': -5.84, 'n': 44},
-    ('0-4', 'kız'):     {'mae': 6.54, 'median': 6.03, 'bias': -3.10, 'n': 45},
-    ('4-10', 'erkek'):  {'mae': 9.30, 'median': 8.17, 'bias': 1.37,  'n': 278},
-    ('4-10', 'kız'):    {'mae': 7.35, 'median': 6.11, 'bias': 3.71,  'n': 417},
-    ('10-14', 'erkek'): {'mae': 6.92, 'median': 6.29, 'bias': -4.75, 'n': 570},
-    ('10-14', 'kız'):   {'mae': 8.49, 'median': 8.02, 'bias': -6.13, 'n': 325},
-    ('14-20', 'erkek'): {'mae': 8.76, 'median': 7.33, 'bias': -4.73, 'n': 152},
-    ('14-20', 'kız'):   {'mae': 9.36, 'median': 7.43, 'bias': 3.93,  'n': 61},
+    ('0-4', 'erkek'):   {'mae': 5.48, 'median': 4.20, 'bias': -3.92, 'n': 44},
+    ('0-4', 'kız'):     {'mae': 4.16, 'median': 3.45, 'bias': -1.70, 'n': 45},
+    ('4-10', 'erkek'):  {'mae': 8.24, 'median': 7.10, 'bias': 0.85,  'n': 278},
+    ('4-10', 'kız'):    {'mae': 7.38, 'median': 6.20, 'bias': 2.15,  'n': 417},
+    ('10-14', 'erkek'): {'mae': 7.20, 'median': 6.10, 'bias': -3.50, 'n': 570},
+    ('10-14', 'kız'):   {'mae': 7.58, 'median': 6.75, 'bias': -4.80, 'n': 325},
+    ('14-20', 'erkek'): {'mae': 7.65, 'median': 6.40, 'bias': -3.95, 'n': 152},
+    ('14-20', 'kız'):   {'mae': 8.30, 'median': 7.10, 'bias': 2.50,  'n': 61},
 }
 
 GP_ATLAS = {
@@ -91,31 +90,29 @@ GP_ATLAS = {
 
 
 def download_model():
-    """HuggingFace'ten modeli indir."""
     os.makedirs("models", exist_ok=True)
     if not os.path.exists(MODEL_PATH):
-        print(f"📥 Model HuggingFace'ten indiriliyor: {HF_REPO}/{HF_FILENAME}")
-        downloaded_path = hf_hub_download(
+        print(f"📥 Model indiriliyor: {HF_REPO}/{HF_FILENAME}")
+        hf_hub_download(
             repo_id=HF_REPO,
             filename=HF_FILENAME,
             local_dir="models",
             token=os.environ.get("HF_TOKEN", None)
         )
-        print(f"✅ Model indirildi: {downloaded_path}")
+        print(f"✅ Model indirildi")
     else:
-        print(f"✅ Model zaten mevcut: {MODEL_PATH}")
+        print(f"✅ Model mevcut: {MODEL_PATH}")
 
 
 def load_model():
     global MODEL
     download_model()
-    MODEL = BoneAgeModelV2().to(DEVICE)
+    MODEL = BoneAgeModel(backbone_name="convnext_small").to(DEVICE)
     checkpoint = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False)
     state = checkpoint.get('model_state_dict', checkpoint)
     MODEL.load_state_dict(state, strict=False)
     MODEL.eval()
-    mae = checkpoint.get('best_mae', 'N/A')
-    print(f"✅ CBAM model yüklendi (MAE: {mae})")
+    print(f"✅ ConvNeXt-Small yüklendi (MAE: {checkpoint.get('best_mae', 'N/A')})")
 
 
 def get_tta_transforms():
@@ -147,7 +144,6 @@ def get_gp_reference(months, gender):
 
 
 def predict_image(img_np, gender_val):
-    """Görüntüden TTA tahmin yap."""
     gender_tensor = torch.tensor([gender_val]).to(DEVICE)
     predictions = []
     with torch.no_grad():
@@ -159,14 +155,13 @@ def predict_image(img_np, gender_val):
 
 
 def build_response(predictions, gender_key, birth_date=None):
-    """Tahminlerden response oluştur."""
     pred_mean = float(np.mean(predictions))
     pred_std = float(np.std(predictions))
     yil, ay = int(pred_mean // 12), int(pred_mean % 12)
 
     age_group = get_age_group(pred_mean)
     cal = CALIBRATION_TABLE.get((age_group, gender_key),
-                                 {'mae': 7.33, 'median': 6.21, 'bias': -1.03, 'n': 0})
+                                 {'mae': 7.48, 'median': 6.39, 'bias': -1.95, 'n': 0})
 
     combined_error = (pred_std * 0.4) + (cal['mae'] * 0.6)
     confidence_95 = round(combined_error * 1.96, 1)
@@ -200,7 +195,7 @@ def build_response(predictions, gender_key, birth_date=None):
         },
         "atlas_comparison": gp,
         "model_info": {
-            "model_type": "ConvNeXt-CBAM (V2)",
+            "model_type": "ConvNeXt-Small (V1)",
             "version": "2.3",
             "img_size": IMG_SIZE,
             "tta_count": 5,
@@ -246,8 +241,8 @@ async def root():
     return {
         "service": "RadioHelp Bone Age API",
         "version": "2.3",
-        "model": "ConvNeXt-CBAM (V2)",
-        "mae": "7.33 ay",
+        "model": "ConvNeXt-Small (V1)",
+        "mae": "7.48 ay",
         "status": "ready" if MODEL is not None else "loading"
     }
 
