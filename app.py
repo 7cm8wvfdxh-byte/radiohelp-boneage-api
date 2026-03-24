@@ -92,16 +92,16 @@ GP_ATLAS = {
 def download_model():
     os.makedirs("models", exist_ok=True)
     if not os.path.exists(MODEL_PATH):
-        print(f"📥 Model indiriliyor: {HF_REPO}/{HF_FILENAME}")
+        print(f"Model indiriliyor: {HF_REPO}/{HF_FILENAME}")
         hf_hub_download(
             repo_id=HF_REPO,
             filename=HF_FILENAME,
             local_dir="models",
             token=os.environ.get("HF_TOKEN", None)
         )
-        print(f"✅ Model indirildi")
+        print(f"Model indirildi")
     else:
-        print(f"✅ Model mevcut: {MODEL_PATH}")
+        print(f"Model mevcut: {MODEL_PATH}")
 
 
 def load_model():
@@ -112,7 +112,7 @@ def load_model():
     state = checkpoint.get('model_state_dict', checkpoint)
     MODEL.load_state_dict(state, strict=False)
     MODEL.eval()
-    print(f"✅ ConvNeXt-Small yüklendi (MAE: {checkpoint.get('best_mae', 'N/A')})")
+    print(f"ConvNeXt-Small yüklendi (MAE: {checkpoint.get('best_mae', 'N/A')})")
 
 
 def get_tta_transforms():
