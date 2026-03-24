@@ -1,9 +1,10 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 torch
 torchvision
-fastapi==0.109.0
-uvicorn==0.27.0
-python-multipart==0.0.6
-albumentations==1.4.0
+fastapi
+uvicorn
+python-multipart
+albumentations
 Pillow
 numpy
 opencv-python-headless
