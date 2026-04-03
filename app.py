@@ -1,6 +1,6 @@
 """
-RadioHelp — Kemik Yaşı API v2.3 (Render Deploy)
-ConvNeXt-Small V1, HuggingFace'ten otomatik indirme
+RadioHelp — Kemik Yasi API v3.0 (Render Deploy)
+ConvNeXt V1 Base, MAE 6.76 ay, HuggingFace'ten otomatik indirme
 """
 
 from fastapi import FastAPI, UploadFile, File, Form
@@ -16,7 +16,7 @@ import os
 from datetime import date, datetime
 from huggingface_hub import hf_hub_download
 
-app = FastAPI(title="RadioHelp Bone Age API", version="2.3")
+app = FastAPI(title="RadioHelp Bone Age API", version="3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,64 +27,68 @@ app.add_middleware(
 )
 
 DEVICE = "cpu"
-AGE_MAX = 240.0
 MODEL = None
 IMG_SIZE = 512
 
-HF_REPO = "TugrulHanSahin/radiohelp-boneage"
-HF_FILENAME = "best_convnext_small.pth"
-MODEL_PATH = "models/best_convnext_small.pth"
+# z-score denormalizasyon parametreleri
+AGE_MEAN = 127.3
+AGE_STD = 41.2
 
+HF_REPO = "TugrulHanSahin/radiohelp-boneage"
+HF_FILENAME = "masked_v1base_fold0_mae6.76.pth"
+MODEL_PATH = "models/masked_v1base_fold0_mae6.76.pth"
+
+# Kalibrasyon tablosu (2515 validation orneginden hesaplandi, bias correction YOK)
 CALIBRATION_TABLE = {
-    ('0-4', 'erkek'):   {'mae': 6.25, 'median': 5.56, 'bias': -0.93, 'n': 44},
-    ('0-4', 'kız'):     {'mae': 4.30, 'median': 3.69, 'bias': 0.43,  'n': 45},
-    ('4-10', 'erkek'):  {'mae': 8.09, 'median': 6.81, 'bias': 3.31,  'n': 278},
-    ('4-10', 'kız'):    {'mae': 6.95, 'median': 5.72, 'bias': 2.98,  'n': 417},
-    ('10-14', 'erkek'): {'mae': 7.38, 'median': 6.73, 'bias': -5.57, 'n': 570},
-    ('10-14', 'kız'):   {'mae': 8.55, 'median': 7.95, 'bias': -6.95, 'n': 325},
-    ('14-20', 'erkek'): {'mae': 6.83, 'median': 5.32, 'bias': -3.04, 'n': 152},
-    ('14-20', 'kız'):   {'mae': 8.38, 'median': 6.33, 'bias': 0.94,  'n': 61},
+    ('0-4', 'erkek'):   {'mae': 5.51, 'median': 3.43, 'n': 54},
+    ('0-4', 'kiz'):     {'mae': 6.06, 'median': 5.42, 'n': 46},
+    ('4-10', 'erkek'):  {'mae': 8.35, 'median': 6.31, 'n': 331},
+    ('4-10', 'kiz'):    {'mae': 6.90, 'median': 5.59, 'n': 470},
+    ('10-14', 'erkek'): {'mae': 6.19, 'median': 5.12, 'n': 679},
+    ('10-14', 'kiz'):   {'mae': 7.07, 'median': 6.00, 'n': 537},
+    ('14-20', 'erkek'): {'mae': 5.25, 'median': 4.12, 'n': 277},
+    ('14-20', 'kiz'):   {'mae': 7.90, 'median': 6.62, 'n': 121},
 }
 
 GP_ATLAS = {
     'erkek': {
-        0: "Yenidoğan: Ossifikasyon merkezi görülmez",
+        0: "Yenidogan: Ossifikasyon merkezi gorulmez",
         6: "6 ay: Kapitat ve hamat belirgin",
-        12: "1 yaş: Distal radius epifizi görülmeye başlar",
-        24: "2 yaş: Trikuetrum, lunat belirgin",
-        36: "3 yaş: Skafoid, trapezium başlangıcı",
-        48: "4 yaş: Tüm karpal kemikler görülür (pisiform hariç)",
-        60: "5 yaş: Falangeal epifizler belirginleşir",
-        72: "6 yaş: Metakarpal epifizler gelişir",
-        84: "7 yaş: Pisiform ossifikasyonu başlar",
-        96: "8 yaş: Distal ulna epifizi belirginleşir",
-        108: "9 yaş: Epifizler büyümeye devam",
-        120: "10 yaş: Karpal kemikler adult şekle yaklaşır",
-        132: "11 yaş: Epifiz plakları daralmaya başlar",
-        144: "12 yaş: Distal radius epifiz füzyonu başlangıcı",
-        156: "13 yaş: Epifiz füzyonları ilerler",
-        168: "14 yaş: Çoğu epifiz kapanmış veya kapanmak üzere",
-        180: "15 yaş: Distal radius ve ulna füzyonu tamamlanır",
-        192: "16 yaş: Tüm epifizler kapanmış",
-        204: "17 yaş: Tam skeletal matürite",
+        12: "1 yas: Distal radius epifizi gorulmeye baslar",
+        24: "2 yas: Trikuetrum, lunat belirgin",
+        36: "3 yas: Skafoid, trapezium baslangici",
+        48: "4 yas: Tum karpal kemikler gorulur (pisiform haric)",
+        60: "5 yas: Falangeal epifizler belirginlesir",
+        72: "6 yas: Metakarpal epifizler gelisir",
+        84: "7 yas: Pisiform ossifikasyonu baslar",
+        96: "8 yas: Distal ulna epifizi belirginlesir",
+        108: "9 yas: Epifizler buyumeye devam",
+        120: "10 yas: Karpal kemikler adult sekle yaklasir",
+        132: "11 yas: Epifiz plaklari daralmaya baslar",
+        144: "12 yas: Distal radius epifiz fuzyonu baslangici",
+        156: "13 yas: Epifiz fuzyonlari ilerler",
+        168: "14 yas: Cogu epifiz kapanmis veya kapanmak uzere",
+        180: "15 yas: Distal radius ve ulna fuzyonu tamamlanir",
+        192: "16 yas: Tum epifizler kapanmis",
+        204: "17 yas: Tam skeletal maturite",
     },
-    'kız': {
-        0: "Yenidoğan: Ossifikasyon merkezi görülmez",
-        6: "6 ay: Kapitat ve hamat belirgin, distal radius başlangıcı",
-        12: "1 yaş: Lunat, trikuetrum ossifikasyonu",
-        24: "2 yaş: Trapezium, trapezoid başlangıcı",
-        36: "3 yaş: Tüm karpal kemikler görülür (pisiform hariç)",
-        48: "4 yaş: Falangeal epifizler belirginleşir",
-        60: "5 yaş: Metakarpal epifizler gelişir",
-        72: "6 yaş: Pisiform ossifikasyonu",
-        84: "7 yaş: Distal ulna epifizi",
-        96: "8 yaş: Karpal kemikler adult şekle yaklaşır",
-        108: "9 yaş: Epifiz plakları daralmaya başlar",
-        120: "10 yaş: Distal radius epifiz füzyonu başlangıcı",
-        132: "11 yaş: Epifiz füzyonları ilerler",
-        144: "12 yaş: Çoğu epifiz kapanmış veya kapanmak üzere",
-        156: "13 yaş: Distal radius ve ulna füzyonu",
-        168: "14 yaş: Tam skeletal matürite",
+    'kiz': {
+        0: "Yenidogan: Ossifikasyon merkezi gorulmez",
+        6: "6 ay: Kapitat ve hamat belirgin, distal radius baslangici",
+        12: "1 yas: Lunat, trikuetrum ossifikasyonu",
+        24: "2 yas: Trapezium, trapezoid baslangici",
+        36: "3 yas: Tum karpal kemikler gorulur (pisiform haric)",
+        48: "4 yas: Falangeal epifizler belirginlesir",
+        60: "5 yas: Metakarpal epifizler gelisir",
+        72: "6 yas: Pisiform ossifikasyonu",
+        84: "7 yas: Distal ulna epifizi",
+        96: "8 yas: Karpal kemikler adult sekle yaklasir",
+        108: "9 yas: Epifiz plaklari daralmaya baslar",
+        120: "10 yas: Distal radius epifiz fuzyonu baslangici",
+        132: "11 yas: Epifiz fuzyonlari ilerler",
+        144: "12 yas: Cogu epifiz kapanmis veya kapanmak uzere",
+        156: "13 yas: Distal radius ve ulna fuzyonu",
+        168: "14 yas: Tam skeletal maturite",
     }
 }
 
@@ -107,12 +111,11 @@ def download_model():
 def load_model():
     global MODEL
     download_model()
-    MODEL = BoneAgeModel(backbone_name="convnext_small").to(DEVICE)
+    MODEL = BoneAgeModel().to(DEVICE)
     checkpoint = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False)
-    state = checkpoint.get('model_state_dict', checkpoint)
-    MODEL.load_state_dict(state, strict=False)
+    MODEL.load_state_dict(checkpoint['model_state_dict'])
     MODEL.eval()
-    print(f"ConvNeXt-Small yüklendi (MAE: {checkpoint.get('best_mae', 'N/A')})")
+    print(f"ConvNeXt V1 Base yuklendi (MAE: {checkpoint.get('best_mae', 'N/A')})")
 
 
 def get_tta_transforms():
@@ -138,7 +141,7 @@ def get_gp_reference(months, gender):
     closest = min(atlas.keys(), key=lambda x: abs(x - months))
     return {
         'closest_age_months': closest,
-        'closest_age_display': f"{closest // 12} yaş {closest % 12} ay",
+        'closest_age_display': f"{closest // 12} yas {closest % 12} ay",
         'description': atlas[closest]
     }
 
@@ -149,38 +152,35 @@ def predict_image(img_np, gender_val):
     with torch.no_grad():
         for tf in get_tta_transforms():
             img_tensor = tf(image=img_np)['image'].unsqueeze(0).to(DEVICE)
-            pred = MODEL(img_tensor, gender_tensor).item() * AGE_MAX
-            predictions.append(pred)
+            raw = MODEL(img_tensor, gender_tensor).item()
+            # z-score denormalizasyon
+            pred_months = raw * AGE_STD + AGE_MEAN
+            predictions.append(pred_months)
     return predictions
 
 
 def build_response(predictions, gender_key, birth_date=None):
-    pred_raw = float(np.mean(predictions))
+    pred_mean = float(np.mean(predictions))
     pred_std = float(np.std(predictions))
 
-    # Yaş grubu ve kalibrasyon tablosu (ham tahmine göre)
-    age_group = get_age_group(pred_raw)
-    cal = CALIBRATION_TABLE.get((age_group, gender_key),
-                                 {'mae': 7.48, 'median': 6.39, 'bias': -1.95, 'n': 0})
-
-    # Bias düzeltme: model sistematik olarak düşük/yüksek tahmin ediyorsa düzelt
-    # Bias -5.57 ise model 5.57 ay düşük tahmin ediyor → +5.57 ekle
-    pred_mean = pred_raw - cal['bias']
-    
-    # Sınırla: 0-228 ay arası (0-19 yaş)
+    # Clip: 0-228 ay arasi
     pred_mean = max(0, min(228, pred_mean))
-    
+
+    age_group = get_age_group(pred_mean)
+    cal = CALIBRATION_TABLE.get((age_group, gender_key),
+                                 {'mae': 6.76, 'median': 5.50, 'n': 0})
+
     yil, ay = int(pred_mean // 12), int(pred_mean % 12)
 
     combined_error = (pred_std * 0.4) + (cal['mae'] * 0.6)
     confidence_95 = round(combined_error * 1.96, 1)
 
     if combined_error < 5:
-        reliability, reliability_label = "high", "Yüksek Güvenilirlik"
+        reliability, reliability_label = "high", "Yuksek Guvenilirlik"
     elif combined_error < 8:
-        reliability, reliability_label = "medium", "Orta Güvenilirlik"
+        reliability, reliability_label = "medium", "Orta Guvenilirlik"
     else:
-        reliability, reliability_label = "low", "Düşük Güvenilirlik"
+        reliability, reliability_label = "low", "Dusuk Guvenilirlik"
 
     gp = get_gp_reference(pred_mean, gender_key)
 
@@ -190,31 +190,30 @@ def build_response(predictions, gender_key, birth_date=None):
             "bone_age_years": yil,
             "bone_age_months_remainder": ay,
             "bone_age_total_months": round(pred_mean, 1),
-            "bone_age_raw_months": round(pred_raw, 1),
-            "bone_age_display": f"{yil} yaş {ay} ay",
-            "bias_correction": round(cal['bias'], 2),
+            "bone_age_display": f"{yil} yas {ay} ay",
             "confidence_interval_months": confidence_95,
-            "confidence_interval_display": f"±{confidence_95} ay",
+            "confidence_interval_display": f"\u00b1{confidence_95} ay",
             "tta_std": round(pred_std, 2),
             "reliability": reliability,
             "reliability_label": reliability_label,
             "combined_error": round(combined_error, 2),
         },
         "calibration": {
-            "age_group": f"{age_group} Yaş",
+            "age_group": f"{age_group} Yas",
             "group_mae": cal['mae'],
             "group_median": cal['median'],
-            "group_bias": cal['bias'],
             "group_n": cal['n'],
         },
         "atlas_comparison": gp,
         "model_info": {
-            "model_type": "ConvNeXt-Small (V1)",
-            "version": "2.3",
+            "model_type": "ConvNeXt V1 Base (Masked Pipeline)",
+            "version": "3.0",
+            "mae": "6.76 ay",
             "img_size": IMG_SIZE,
             "tta_count": 5,
+            "normalization": "z-score (mean=127.3, std=41.2)",
         },
-        "disclaimer": "Bu sonuç yalnızca karar destek amaçlıdır. Kesin tanı için radyolog değerlendirmesi gereklidir."
+        "disclaimer": "Bu sonuc yalnizca karar destek amaclidir. Kesin tani icin radyolog degerlendirmesi gereklidir."
     }
 
     if birth_date:
@@ -225,17 +224,17 @@ def build_response(predictions, gender_key, birth_date=None):
             fark = pred_mean - krono_ay
 
             if abs(fark) <= 12:
-                fark_yorum = "Normal sınırlar içinde (±1 yıl)"
+                fark_yorum = "Normal sinirlar icinde (\u00b11 yil)"
             elif abs(fark) <= 24:
-                fark_yorum = "Sınırda — klinik değerlendirme önerilir"
+                fark_yorum = "Sinirda — klinik degerlendirme onerilir"
             else:
-                fark_yorum = "Anormal — endokrinoloji konsültasyonu önerilir"
+                fark_yorum = "Anormal — endokrinoloji konsultasyonu onerilir"
 
             result["clinical_context"] = {
                 "chronological_age_years": krono_ay // 12,
                 "chronological_age_months_remainder": krono_ay % 12,
                 "chronological_age_total_months": krono_ay,
-                "chronological_age_display": f"{krono_ay // 12} yaş {krono_ay % 12} ay",
+                "chronological_age_display": f"{krono_ay // 12} yas {krono_ay % 12} ay",
                 "difference_months": round(fark, 1),
                 "difference_display": f"{abs(round(fark, 0)):.0f} ay {'ileri' if fark > 0 else 'geri'}",
                 "difference_direction": "ileri" if fark > 0 else "geri",
@@ -257,9 +256,9 @@ async def startup():
 async def root():
     return {
         "service": "RadioHelp Bone Age API",
-        "version": "2.3",
-        "model": "ConvNeXt-Small (V1)",
-        "mae": "7.48 ay",
+        "version": "3.0",
+        "model": "ConvNeXt V1 Base (Masked Pipeline)",
+        "mae": "6.76 ay",
         "status": "ready" if MODEL is not None else "loading"
     }
 
@@ -276,14 +275,14 @@ async def predict_bone_age(
     birth_date: str = Form(None)
 ):
     if MODEL is None:
-        return {"success": False, "error": "Model yüklenmedi"}
+        return {"success": False, "error": "Model yuklenmedi"}
 
     contents = await image.read()
     img = Image.open(io.BytesIO(contents)).convert('RGB')
     img_np = np.array(img)
 
     gender_val = 1.0 if gender.lower() in ['erkek', 'm', 'male', '1'] else 0.0
-    gender_key = 'erkek' if gender_val == 1.0 else 'kız'
+    gender_key = 'erkek' if gender_val == 1.0 else 'kiz'
 
     predictions = predict_image(img_np, gender_val)
     return build_response(predictions, gender_key, birth_date)
@@ -292,7 +291,7 @@ async def predict_bone_age(
 @app.post("/api/bone-age-base64")
 async def predict_bone_age_base64(data: dict):
     if MODEL is None:
-        return {"success": False, "error": "Model yüklenmedi"}
+        return {"success": False, "error": "Model yuklenmedi"}
 
     import base64
     img_bytes = base64.b64decode(data['image'])
@@ -301,7 +300,7 @@ async def predict_bone_age_base64(data: dict):
 
     gender = data.get('gender', 'erkek')
     gender_val = 1.0 if gender.lower() in ['erkek', 'm', 'male', '1'] else 0.0
-    gender_key = 'erkek' if gender_val == 1.0 else 'kız'
+    gender_key = 'erkek' if gender_val == 1.0 else 'kiz'
 
     predictions = predict_image(img_np, gender_val)
     return build_response(predictions, gender_key, data.get('birth_date'))
